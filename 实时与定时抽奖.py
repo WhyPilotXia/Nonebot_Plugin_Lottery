@@ -18,6 +18,11 @@ from nonebot.adapters.onebot.v11 import GROUP_ADMIN, GROUP_OWNER, GROUP_MEMBER
 from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event, escape
 from nonebot.typing import T_State
 from nonebot.params import ArgPlainText, CommandArg, ArgStr
+from .notion_contacts import (
+    refresh_contact_maps,
+    get_identity_by_qq,
+    get_display_name_by_identity,
+)
 
 
 try:
@@ -25,6 +30,10 @@ try:
 except Exception:
     logger.warning("请重启程序！")
     scheduler = None
+try:
+    refresh_contact_maps()
+except Exception as e:
+    logger.error(f"刷新 Notion 联系人 QQ 映射失败：{e}")
 
 logger.opt(colors=True).info(
     "已检测到软依赖<y>nonebot_plugin_apscheduler</y>, <g>开启定时任务功能</g>"
@@ -36,8 +45,10 @@ logger.opt(colors=True).info(
 message_history = defaultdict(list)
 active_tasks = {}
 
+
+
 # 抽奖系统全局变量：字典结构群号映射到抽奖项目
-# lotteries[group_id][lottery_id] = {"name": str, "time": datetime, "participants": set()}
+# lotteries[group_id][lottery_id] = {"name": str, "time": datetime, "participants": {}}
 lotteries = defaultdict(dict)
 
 
@@ -105,24 +116,27 @@ async def execute_lottery(bot: Bot, group_id: int, lid: str):
     if group_id not in lotteries or lid not in lotteries[group_id]:
         return
 
-    # 从内存中提取并移除该任务
     ldata = lotteries[group_id].pop(lid)
 
-    # 彻底清理空字典
     if not lotteries[group_id]:
         del lotteries[group_id]
 
-    participants = list(ldata["participants"])
+    participants = ldata["participants"]
     name = ldata["name"]
 
     if not participants:
         msg = f"⏱ 定时抽奖【{name}】时间到！\n很遗憾，由于无人报名，抽奖已取消。"
     else:
-        winner_id = random.choice(participants)
+        winner_identity = random.choice(list(participants.keys()))
+        winner_info = participants[winner_identity]
+
+        winner_qq = winner_info["qq"]
+        winner_name = winner_info.get("name", "")
+
         msg = Message([
             MessageSegment.text(f"🎉 定时抽奖【{name}】开奖啦！\n恭喜 "),
-            MessageSegment.at(winner_id),
-            MessageSegment.text(f" ({winner_id})成为鼠鼠的幸运儿！")
+            MessageSegment.at(winner_qq),
+            MessageSegment.text(f" ({winner_name} / {winner_qq}) 成为鼠鼠的幸运儿！")
         ])
 
     try:
@@ -155,7 +169,7 @@ async def _create_lottery(bot: Bot, event: GroupMessageEvent, args: Message = Co
         await create_lottery_cmd.finish("时间格式解析失败！支持格式如：3h后, 30min后, 2026-5-21T18-25-00, 21T18-25 等")
 
     if target_time <= datetime.now():
-        await create_lottery_cmd.finish(f"你想带鼠鼠穿越回{target_time.strftime('%Y-%m-%dT%H:%M:%S')}吗？设定的时间必须在未来！")
+        await create_lottery_cmd.finish(f"你想穿越回{target_time.strftime('%Y-%m-%dT%H:%M:%S')}吗？设定的时间必须在未来！")
 
     # 生成唯一的抽奖 ID
     lid = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')+event.get_user_id()+target_time.strftime('%Y-%m-%dT%H:%M:%S')
@@ -169,7 +183,7 @@ async def _create_lottery(bot: Bot, event: GroupMessageEvent, args: Message = Co
         "name": name,
         "setter": event.get_user_id(),
         "time": target_time,
-        "participants": set()
+        "participants": {}
     }
 
     # 添加至定时任务
@@ -192,7 +206,7 @@ join_lottery_cmd = on_command("报名", priority=5, block=True)
 async def _join_lottery_check(matcher: Matcher, event: GroupMessageEvent, state: T_State, args: Message = CommandArg()):
     group_id = event.group_id
     if group_id not in lotteries or not lotteries[group_id]:
-        await matcher.finish("哎呀，鼠鼠发现当前群内没有正在进行的定时抽奖项目哇")
+        await matcher.finish("哎呀，当前群内没有正在进行的定时抽奖项目哇")
 
     group_lots = lotteries[group_id]
     arg_text = args.extract_plain_text().strip().upper()
@@ -202,16 +216,22 @@ async def _join_lottery_check(matcher: Matcher, event: GroupMessageEvent, state:
         lid = list(group_lots.keys())[0]
         ldata = group_lots[lid]
 
-        if event.user_id in ldata["participants"]:
-            await matcher.finish(f"鼠鼠发现您已经报名过【{ldata['name']}】了！")
+        identity = get_identity_by_qq(event.user_id)
 
-        ldata["participants"].add(event.user_id)
+        if identity in ldata["participants"]:
+            await matcher.finish(f"您已经报名过【{ldata['name']}】了！")
+
+        ldata["participants"][identity] = {
+            "qq": event.user_id,
+            "name": get_display_name_by_identity(identity),
+        }
+
         await matcher.finish(f"报名成功！您已参加【{ldata['name']}】的抽奖。")
 
     # 情况 2：如果有多个项目
     else:
         mapping = {}
-        msg = "鼠鼠发现有现在多个抽奖项目：\n"
+        msg = "发现有现在多个抽奖项目：\n"
         for i, (lid, ldata) in enumerate(group_lots.items()):
             char_key = chr(65 + i)  # A, B, C...
             mapping[char_key] = lid
@@ -223,7 +243,7 @@ async def _join_lottery_check(matcher: Matcher, event: GroupMessageEvent, state:
         if arg_text:
             matcher.set_arg("choices", args)
         else:
-            msg += "请直接回复你想报名的项目对应字母（例如 A，报多个请回复如 AB）"
+            msg += "请直接回复你想报名的项目对应字母（例如 \"A\"，报多个请回复如 \"AB\"）"
             await matcher.send(msg)
 
 
@@ -253,14 +273,19 @@ async def _process_choices(matcher: Matcher, event: GroupMessageEvent, state: T_
 
             ldata = lotteries[event.group_id][lid]
 
-            if event.user_id in ldata["participants"]:
+            identity = get_identity_by_qq(event.user_id)
+
+            if identity in ldata["participants"]:
                 already.append(ldata["name"])
             else:
-                ldata["participants"].add(event.user_id)
+                ldata["participants"][identity] = {
+                    "qq": event.user_id,
+                    "name": get_display_name_by_identity(identity),
+                }
                 joined.append(ldata["name"])
 
     if invalid:
-        await matcher.reject("无效的选择，请重新回复你想报名的项目字母（如 AB）。")
+        await matcher.reject("无效的选择，请重新回复你想报名的项目字母。")
 
     res_msg = ""
     if joined:
@@ -306,7 +331,7 @@ async def _instant_lottery_check(matcher: Matcher, event: GroupMessageEvent, sta
         msg = Message([
             MessageSegment.text(f"🎉 开奖啦！\n恭喜 "),
             MessageSegment.at(winner_id),
-            MessageSegment.text(f" ({winner_id})成为鼠鼠的幸运儿！")
+            MessageSegment.text(f" ({winner_id})赢得了本次抽奖")
         ])
 
     try:
