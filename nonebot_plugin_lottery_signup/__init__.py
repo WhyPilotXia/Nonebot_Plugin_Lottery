@@ -52,7 +52,7 @@ try:
     refresh_contact_maps()
 except Exception as e:
     if is_notion_enabled():
-        raise RuntimeError("已启用 Notion 去重，但刷新联系人 QQ 映射失败") from e
+        logger.opt(exception=e).error("已启用 Notion 去重，但刷新联系人 QQ 映射失败,fallback到QQ去重")
     logger.error(f"刷新 Notion 联系人 QQ 映射失败：{e}")
 
 logger.opt(colors=True).info(

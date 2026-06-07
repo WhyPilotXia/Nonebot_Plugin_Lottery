@@ -30,7 +30,7 @@ def _get_notion_client():
         try:
             from notion_client import Client
         except ImportError as e:
-            raise RuntimeError("已配置 notion_token，但未安装 notion-client") from e
+            raise RuntimeError("已配置 notion_token，但未安装 notion-client,请在当前python环境执行 pip install notion-client>=2.2.0") from e
 
         notion = Client(auth=plugin_config.notion_token)
 
@@ -170,7 +170,7 @@ def refresh_contact_maps() -> dict[str, str]:
     qq_to_contact_id = new_qq_to_contact_id
     contact_id_to_info = new_contact_id_to_info
 
-    logger.info(f"已刷新 Notion 联系人 QQ 映射，共 {len(qq_to_contact_id)} 个 QQ")
+    logger.success(f"已刷新 Notion 联系人 QQ 映射，共 {len(qq_to_contact_id)} 个 QQ")
     return qq_to_contact_id
 
 
